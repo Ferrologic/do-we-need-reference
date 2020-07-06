@@ -1,0 +1,248 @@
+---
+title: "Behöver vi referensperiod"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+K2 has proven to be an effective way at detecting anomalies in district heating. However, one of the caveats of K2 is the need of a reference period. The algorithm behind the K2 software, built by Smart Energi, first trains a segmented regression model on a reference period, which is a subset of the data that we want to investigate. In the next step it applies that model to all the data and compares the model on the reference period to the new data. If the new values deviate too much from the expected values, the algorithm classifies it as a anomaly and creates an alarm.
+
+The crux is that this reference period has to be manually selected, and if you have a couple of thousand metering points this task is impossible. Often users will use a specific year in the data as the reference period, for all metering points. If they get too many alarms because of a bad reference period they'll manually pick a new reference period. There is also a feature in K2 which calculates the standard deviation of district heating consumption for each year and picks the year with least spread. 
+
+The manual selection of reference period can be a tedious job. Therefore, we would like to investigate if we actually need a reference period. That is, what will happen if we instead of using a reference period fit a model to the whole data set and then calculate the deviation?
+
+## What do we want to detect?
+
+The two primary objectives of K2 are to 1) detect anomalies and create alarms for these and 2) detect trend changes. 
+
+Anomalies are detected when new observations deviate too much from their expected values. There is no explicit method for detecting trend changes in K2. Nevertheless, trend changes are usually associated with some kind of data drift, that is, that the new unseen data is different than the reference period. This is usually detected when there are more alarms than usual which indicate a drift in the new data compared to the reference period.
+
+```{r echo=FALSE}
+library(reticulate)
+
+use_condaenv(condaenv = "myenv", conda = "/anaconda3/bin/conda", required = TRUE)
+```
+
+The algorithm used in K2 is thoroughly described here. But we can have a look at the model and how it fits to the reference data below.
+
+```{python echo=FALSE}
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+from backend.Matrix import Matrix
+from backend.Group import Group
+from backend.Point import Point
+from standard_deviation import StandardDeviation #Kopierad från källkoden, går ej att importera
+
+#temperaturintervall, hårdkodat i _default_controller.py
+BREAKPOINTS = [-5, 2, 9, 15, 20]
+
+tds9 = pd.read_csv('data/TDS9_test.csv', sep=';')
+tds9['Timestamp'] = pd.to_datetime(tds9.Timestamp)
+tds9['Consumption From'] = pd.to_datetime(tds9['Consumption From'])
+tds9['Consumption To'] = pd.to_datetime(tds9['Consumption To'])
+
+tds9 = tds9[(tds9.Property=='energy') & (tds9.Value > 0.)]
+
+tds9_ref = pd.read_csv('data/TDS9_ref2.csv', sep=';')
+tds9_ref['Timestamp'] = pd.to_datetime(tds9_ref.Timestamp)
+tds9_ref['Consumption From'] = pd.to_datetime(tds9_ref['Consumption From'])
+tds9_ref['Consumption To'] = pd.to_datetime(tds9_ref['Consumption To'])
+tds9_ref = tds9_ref[tds9_ref.Property=='energy']
+
+tds9['Temperature interval'] = pd.cut(tds9['Temperature'], [-100] + BREAKPOINTS[1:-1] + [100])
+tds9_ref['Temperature interval'] = pd.cut(tds9_ref['Temperature'], [-100] + BREAKPOINTS[1:-1] + [100])
+
+def fill_points_with_data(df):
+    points = []
+    for index, row in df.iterrows():
+        point = Point()
+        point.temp = float(row['Temperature'])
+        try:
+            point.reading = row['Consumption Value'] 
+            point.timestamp = row['Timestamp']
+            point.consumption_timestamp = row['Consumption From']
+            point.breakpoints = BREAKPOINTS
+        except:
+            None
+        points.append(point)
+    return points
+
+points_energy_ref = fill_points_with_data(tds9_ref)
+points_energy_test = fill_points_with_data(tds9)
+
+# Skapa grupp för referensdata
+g_energy = Group()
+g_energy.set_breakpoints(BREAKPOINTS)
+g_energy.set_points(points_energy_ref)
+
+# Skapa grupp även för test data (används senare)
+g_energy_test = Group()
+g_energy_test.set_breakpoints(BREAKPOINTS)
+g_energy_test.set_points(points_energy_test)
+
+koff = g_energy.calcKoff()
+g_energy.updatePointRegression(koff)
+
+#Skapa data grupp för breakpoints för visualisering av modell
+breakpoint_df = pd.DataFrame({'Temperature' : BREAKPOINTS})
+points_bp = fill_points_with_data(breakpoint_df)
+bp_group = Group()
+bp_group.set_breakpoints(BREAKPOINTS)
+bp_group.set_points(points_bp)
+bp_group.updatePointRegression(koff)
+
+ref_modell = pd.DataFrame([[point.reading, point.regression, point.temp] for point in g_energy.points], columns=['Consumption', 'Model', 'Temperature'])
+bp_modell = pd.DataFrame([[point.reading, point.regression, point.temp] for point in bp_group.points], columns=['Consumption', 'Model', 'Temperature'])
+
+import itertools
+palette = sns.color_palette()
+
+sns.scatterplot(x = 'Temperature', y = 'Consumption', marker='.', data = ref_modell, label = 'Reference data')
+sns.lineplot(x = 'Temperature', y='Model', marker = 'o', data = bp_modell, color = palette[1], label = 'Model')
+plt.legend()
+plt.show();
+```
+
+If we apply this regression line to the dataset we get the following alarms.
+
+```{python}
+g_energy_test.updatePointRegression(koff)
+test_modell = pd.DataFrame([[point.reading, point.regression, point.temp] for point in g_energy.points], columns=['Mätvärde', 'Modell', 'Temperatur'])
+
+def larm(row, std_cutoff=2.):
+    standard_deviation = row['stdav']
+    diff = row['resid']
+    max_standard_deviation = std_cutoff
+    if (abs(diff)/standard_deviation) > max_standard_deviation:
+        return 'critical'
+    else:
+        return 'ok'
+
+# calculate std av for this group
+stddev = StandardDeviation(BREAKPOINTS) # Initierar standard deviation klass
+stddev.import_from_group(g_energy) # För över reading, regression, temp från grupp till stddev klass, lagras som pandas dataframe
+stddev.calc_standard_deviation() # Beräknar standardavvikelsen per temperaturintervall
+
+test_modell['resid'] = test_modell['Mätvärde'] - test_modell['Modell']
+test_modell['temp_intervall'] = pd.cut(ref_modell['Temperature'], [-100] + BREAKPOINTS[1:] + [100])
+
+std = pd.DataFrame(stddev._dataframe.groupby(['temp_intervall'])[
+            'consumption_norm'].std().rename('stdav'))
+test_modell = test_modell.join(std, on = 'temp_intervall')
+test_modell['larm'] = test_modell.apply(lambda row: larm(row), axis=1)
+
+sns.scatterplot(x ='Temperatur', y = 'Mätvärde', hue='larm', marker = '.', data = test_modell)
+sns.lineplot(x = 'Temperatur', y='Modell', data = test_modell, color = palette[1], label = 'Model')
+plt.show();
+```
+
+But if we abandon the idea of a reference period, and instead treat both the reference data and the test data as one dataset, fit a segmented regression on in similar fashion investigate the residuals, how will that change the alarms?
+
+First, we can visually inspect the observations for the whole period. The periods are alike but the reference period has a different signature during the warm days, which actually is the cause of the alarms created in the plot above.
+
+```{python}
+tds9.loc[tds9['Timestamp'] <= '2017-12-31', 'ref'] = 'ref_data' 
+tds9.loc[tds9['Timestamp'] > '2017-12-31', 'ref'] = 'test_data' 
+
+sns.scatterplot(x = 'Temperature', y = 'Consumption Value', hue = 'ref', data = tds9, alpha = 0.5)
+
+plt.show()
+```
+
+So, let's fit a segmented regression to this data. 
+
+```{python}
+def fill_points_with_data(df):
+    points = []
+    for index, row in df.iterrows():
+        point = Point()
+        point.temp = float(row['Temperature'])
+        try:
+            point.reading = row['Consumption Value'] 
+            point.timestamp = row['Timestamp']
+            point.consumption_timestamp = row['Consumption From']
+            point.breakpoints = BREAKPOINTS
+        except:
+            None
+        points.append(point)
+    return points
+
+points_energy_full = fill_points_with_data(tds9)
+
+# Skapa grupp för all data
+g_energy_full = Group()
+g_energy_full.set_breakpoints(BREAKPOINTS)
+g_energy_full.set_points(points_energy_full)
+
+koff = g_energy_full.calcKoff()
+g_energy_full.updatePointRegression(koff)
+
+#Skapa data grupp för breakpoints för visualisering av modell
+breakpoint_df = pd.DataFrame({'Temperature' : BREAKPOINTS})
+points_bp = fill_points_with_data(breakpoint_df)
+bp_group = Group()
+bp_group.set_breakpoints(BREAKPOINTS)
+bp_group.set_points(points_bp)
+bp_group.updatePointRegression(koff)
+
+full_modell = pd.DataFrame([[point.reading, point.regression, point.temp] for point in g_energy_full.points], columns=['Consumption', 'Model', 'Temperature'])
+bp_modell = pd.DataFrame([[point.reading, point.regression, point.temp] for point in bp_group.points], columns=['Consumption', 'Model', 'Temperature'])
+
+import itertools
+palette = sns.color_palette()
+
+sns.scatterplot(x = 'Temperature', y = 'Consumption', marker='.', data = full_modell)
+sns.lineplot(x = 'Temperature', y='Model', marker = 'o', data = bp_modell, color = palette[1], label = 'Model')
+plt.legend()
+plt.show();
+```
+
+How do the alarms look?
+
+```{python}
+def larm(row, std_cutoff=2.):
+    standard_deviation = row['stdav']
+    diff = row['resid']
+    max_standard_deviation = std_cutoff
+    if (abs(diff)/standard_deviation) > max_standard_deviation:
+        return 'critical'
+    else:
+        return 'ok'
+
+# calculate std av for this group
+stddev = StandardDeviation(BREAKPOINTS) # Initierar standard deviation klass
+stddev.import_from_group(g_energy) # För över reading, regression, temp från grupp till stddev klass, lagras som pandas dataframe
+stddev.calc_standard_deviation() # Beräknar standardavvikelsen per temperaturintervall
+
+full_modell['resid'] = full_modell['Consumption'] - full_modell['Model']
+full_modell['temp_intervall'] = pd.cut(full_modell['Temperature'], [-100] + BREAKPOINTS[1:] + [100])
+
+std = pd.DataFrame(stddev._dataframe.groupby(['temp_intervall'])[
+            'consumption_norm'].std().rename('stdav'))
+            
+
+full_modell = full_modell.join(std, on = 'temp_intervall')
+full_modell['larm'] = full_modell.apply(lambda row: larm(row), axis=1)
+
+sns.scatterplot(x ='Temperature', y = 'Consumption', hue='larm', marker = '.', data = full_modell)
+sns.lineplot(x = 'Temperature', y='Model', data = bp_modell, color = palette[1], label = 'Model')
+plt.show();
+```
+
+For this case, the difference between fitting the model on reference data compared to all the data is small. In reality, it would make more sense to fit the model to the whole data set in this case. 
+
+## Why do we use a reference period?
+
+Nevertheless, this metering point is by no means representative for all metering points in a district heating network. For instance, if a metering point has a lot of anomalies and we try to fit a model to the data it might get confused and it will cause an overwhelming number of alarms. This will happen if we use a reference period as well, but the reference period gives the user the possibility to adjust which data to compare new observations against. 
+
+So the answer is partly that, yes, in K2 it makes sense to use a reference period 
+
+
+
+
+
+
