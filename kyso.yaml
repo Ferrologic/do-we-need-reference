@@ -1,3 +1,3 @@
-title: "The algorithm behind identifying deviations in K2"
-description: "Description of the algorithm with examples"
-main: K2_regression_eng.ipynb
+title: "Do we need a reference period to find deviations in K2?"
+description: "An exploratory analysis about what happens when don't use reference period in K2"
+main: referensperiod.md

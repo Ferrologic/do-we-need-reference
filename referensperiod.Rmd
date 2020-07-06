@@ -1,6 +1,6 @@
 ---
 title: "Behöver vi referensperiod"
-output: html_document
+output: md_document
 ---
 
 ```{r setup, include=FALSE}
@@ -239,7 +239,11 @@ For this case, the difference between fitting the model on reference data compar
 
 Nevertheless, this metering point is by no means representative for all metering points in a district heating network. For instance, if a metering point has a lot of anomalies and we try to fit a model to the data it might get confused and it will cause an overwhelming number of alarms. This will happen if we use a reference period as well, but the reference period gives the user the possibility to adjust which data to compare new observations against. 
 
-So the answer is partly that, yes, in K2 it makes sense to use a reference period 
+So the answer is partly that, yes, in K2 it makes sense to use a reference period. However, it is not necessarily so that we need to use a reference period for all metering points. 
+
+The reference period is used today mainly as a data quality tool. If the quality of data is poor, i.e. there are lots of missing values, a whole year with anomalies or other peculiarities that exist in a district heating network; this will create a large amount of alarms which will force the K2 user to change reference period to a more suitable time period. Perhaps a different approach would be to first do a data quality check to and then try to find deviations. 
+
+In a later post we'll investigate what happens when we skip the reference period for a larger amount of metering points. 
 
 
 
