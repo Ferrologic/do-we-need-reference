@@ -9,7 +9,7 @@ stomp.py == 4.1.20
 strict-rfc3339 >= 0.7
 pandas == 0.24.2
 cryptography == 2.7
-aiohttp == 2.3.10
+aiohttp == 3.7.4
 aiodns == 2.0.0
 werkzeug == 0.15.6 
 connexion == 1.5.3
