@@ -1,7 +1,7 @@
 gunicorn == 19.9.0
 iso8601 == 0.1.12
 mongoengine == 0.16.3
-numpy == 1.16.2
+numpy == 1.22.0
 pyjwt == 1.7.1
 python_dateutil == 2.6.0
 setuptools >= 21.0.0
